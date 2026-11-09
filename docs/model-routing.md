@@ -117,3 +117,67 @@ virtual id and stores the concrete pick in `responseModel`. Requests are
 always sent as the virtual id (never the concrete pick), while the transcript
 records which concrete model served each response. This keeps attribution
 honest and makes resume work without extra bookkeeping.
+
+## Permissions classifier model (`modelRoles.classifier`)
+
+The permissions classifier decides whether a tool call needs confirmation in
+auto mode. Configure it with `modelRoles.classifier` in the user-level
+`~/.config/kimchi/harness/settings.json`. The value is a string or an ordered
+array of `provider/model-id` refs; the classifier tries them in order.
+
+```json
+{
+  "modelRoles": {
+    "classifier": ["kimchi-dev/glm-5.3-flash", "anthropic/claude-haiku-4-5"]
+  }
+}
+```
+
+- **Default:** `kimchi-dev/deepseek-v4-flash-0731`, `kimchi-dev/glm-5.3-flash`,
+  `kimchi-dev/minimax-m3` (`DEFAULT_MODEL_ROLES.classifier`). With no config,
+  behaviour is unchanged.
+- **Strict replace:** a configured list fully replaces the defaults. If none
+  of the refs resolve, the classifier is unavailable and calls needing
+  classification ask for confirmation, or are blocked when there is no UI.
+  If only some refs are missing they are skipped and you get a degraded
+  warning. Warnings point to `modelRoles.classifier`.
+- **User scope only:** project files (`.pi/settings.json`,
+  `.kimchi/permissions.json`, `.kimchi/permissions.local.json`) cannot change
+  it, so a repository cannot weaken the safety classifier.
+- **Not for delegation:** classifier models are not subagent models. They
+  never appear in orchestrator role lists or allowed Agent models.
+- **Request tags:** the `source:classifier` cost-tracking tag is sent only to
+  Kimchi providers; other providers get no `tags` field.
+
+### `/multi-model`
+
+The TUI and ACP both have a "Classifier" multi-select row (ACP uses a
+select-based `[x]`/`[ ]` list with a Done entry). The picker cannot reorder:
+newly ticked models are appended last, behind any still-ticked (possibly
+failing) defaults. To make a new model primary, untick the others or edit
+`settings.json` directly.
+
+The picker only offers Kimchi (`kimchi-dev/...`) catalog models plus models
+that are already configured. To use a direct provider model as the classifier
+(for example `anthropic/claude-haiku-...`), first add it to
+`modelRoles.classifier` in `settings.json`; after that it appears in the
+picker. Other roles work the same way. Only Kimchi models receive request
+tags.
+
+The startup check (`validateModelRoles`) intentionally skips
+`modelRoles.classifier`, so a misspelled classifier model is not reported at
+startup. It surfaces as the classifier health warning on the first classified
+tool call.
+
+### Upgrade and downgrade
+
+There is no migration. Defaults live in code, and `/multi-model` persists
+`classifier` only when it differs from the default, so users who never
+customize keep tracking future default changes. Older kimchi versions ignore
+the key, but if they save via `/multi-model` they drop it.
+
+### Restart required for hand edits
+
+Roles are cached, so hand edits to `settings.json` need a restart to take
+effect. This matters most for the long-running ACP server: restart the IDE's
+agent process. Changes made via `/multi-model` apply immediately.

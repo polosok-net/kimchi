@@ -36,6 +36,7 @@ import { loadRuntimeState } from "../ferment/runtime-state-store.js"
 import { FERMENT_TOOLS } from "../ferment/tool-names.js"
 import { FERMENT_V2_RESOURCE_ID, FERMENT_V2_TOOL_NAMES } from "../ferment-v2/constants.js"
 import { registerFermentV2PlanExecutor } from "../ferment-v2/plan-executor.js"
+import { DEFAULT_MODEL_ROLES, normalizeRoleModels } from "../orchestration/model-roles.js"
 import { buildSystemPrompt, type EnvironmentInfo } from "../prompt-construction/system-prompt.js"
 import { createToolVisibility } from "../prompt-construction/tool-visibility.js"
 import { CUSTOM_BRANCH_ITEM, CUSTOM_BRANCH_PROMPT } from "../remote-run/git-workflow.js"
@@ -45,7 +46,7 @@ import { COST_PER_PR_RESOURCE_ID } from "../work-attribution/resource.js"
 import { flushWorkSummaries, readWorkRecords } from "../work-attribution/summary.js"
 import { createWorkAttributionExtension, getWorkId, setWorkId } from "../work-attribution.js"
 import { classifyToolCall } from "./classifier.js"
-import { DEFAULT_CLASSIFIER_CANDIDATE_REFS, resolveClassifierCandidates } from "./classifier-models.js"
+import { resolveClassifierCandidates } from "./classifier-models.js"
 import { PERMISSIONS_ENV_KEY } from "./constants.js"
 import permissionsExtension, { checkCompoundCommand, handleCompoundConfirm, notifyFermentActive } from "./index.js"
 import { PERMISSION_MODE_SESSION_ENTRY_TYPE } from "./mode.js"
@@ -66,6 +67,8 @@ const runCloudAgentMock = vi.mocked(runCloudAgent)
 
 import { SessionMemory } from "./session-memory.js"
 import type { PermissionModeState, Rule } from "./types.js"
+
+const DEFAULT_CLASSIFIER_REFS = normalizeRoleModels(DEFAULT_MODEL_ROLES.classifier ?? [])
 
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>()
@@ -365,7 +368,7 @@ describe("classifier health reporting", () => {
 		for (let i = 0; i < 2; i++) {
 			vi.mocked(resolveClassifierCandidates).mockReturnValueOnce({
 				candidates: [],
-				missingRefs: [...DEFAULT_CLASSIFIER_CANDIDATE_REFS],
+				missingRefs: [...DEFAULT_CLASSIFIER_REFS],
 			})
 			vi.mocked(classifyToolCall).mockResolvedValueOnce(unavailable)
 			await harness.fire("tool_call", event, ctx)
@@ -373,7 +376,7 @@ describe("classifier health reporting", () => {
 		expect(emissions).toHaveBeenCalledTimes(2)
 		expect(emissions).toHaveBeenLastCalledWith({
 			failureCode: "no_candidates",
-			missingRefs: [...DEFAULT_CLASSIFIER_CANDIDATE_REFS],
+			missingRefs: [...DEFAULT_CLASSIFIER_REFS],
 		})
 		expect(degradedEvents).not.toHaveBeenCalled()
 		expect(ctx.ui.notify).toHaveBeenCalledTimes(1)

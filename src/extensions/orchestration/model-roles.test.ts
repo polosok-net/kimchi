@@ -86,6 +86,7 @@ describe("parseModelRoles", () => {
 			researcher: "kimchi-dev/nemotron-3-ultra-fp4",
 			judge: "kimchi-dev/claude-opus-4-6",
 			compactor: DEFAULT_COMPACTOR_MODEL,
+			classifier: DEFAULT_MODEL_ROLES.classifier,
 		}
 		const { roles } = parseModelRoles(custom)
 		expect(roles).toEqual(custom)
@@ -661,5 +662,65 @@ describe("getOrchestratorModel", () => {
 
 		expect(modelRef).toBe(SUB_PROVIDER_REF)
 		expect(model && refFromModel(model)).toBe(SUB_PROVIDER_REF)
+	})
+})
+
+describe("classifier role", () => {
+	const DEFAULT_CLASSIFIER = ["kimchi-dev/deepseek-v4-flash-0731", "kimchi-dev/glm-5.3-flash", "kimchi-dev/minimax-m3"]
+
+	beforeEach(() => {
+		mkdirSync(testDir, { recursive: true })
+	})
+
+	afterEach(() => {
+		try {
+			rmSync(testDir, { recursive: true, force: true })
+		} catch {}
+	})
+
+	it("defaults to the three default refs", () => {
+		expect(parseModelRoles(undefined).roles.classifier).toEqual(DEFAULT_CLASSIFIER)
+	})
+
+	it("keeps the default for legacy config without warnings", () => {
+		const { roles, warnings } = parseModelRoles({ builder: "openai/gpt-4o" })
+		expect(roles.classifier).toEqual(DEFAULT_CLASSIFIER)
+		expect(warnings.some((w) => w.role === "classifier")).toBe(false)
+	})
+
+	it("accepts and trims a string", () => {
+		expect(parseModelRoles({ classifier: "  openai/gpt-4o " }).roles.classifier).toBe("openai/gpt-4o")
+	})
+
+	it("accepts an array preserving order", () => {
+		expect(parseModelRoles({ classifier: ["b/y", "a/x"] }).roles.classifier).toEqual(["b/y", "a/x"])
+	})
+
+	it.each([[""], [[]], [[""]], [42]])("warns and keeps default for invalid value %j", (value) => {
+		const { roles, warnings } = parseModelRoles({ classifier: value })
+		expect(roles.classifier).toEqual(DEFAULT_CLASSIFIER)
+		expect(warnings.some((w) => w.role === "classifier")).toBe(true)
+	})
+
+	it("does not write classifier when only builder changed", () => {
+		saveModelRoles({ ...DEFAULT_MODEL_ROLES, builder: "openai/gpt-4o" })
+		const saved = JSON.parse(readFileSync(testPath, "utf-8"))
+		expect(saved.modelRoles).toEqual({ builder: "openai/gpt-4o" })
+	})
+
+	it("round-trips a custom classifier and omits the default", () => {
+		saveModelRoles({ ...DEFAULT_MODEL_ROLES, classifier: ["openai/gpt-4o"] })
+		resetModelRolesCache()
+		expect(getModelRoles().classifier).toEqual(["openai/gpt-4o"])
+
+		saveModelRoles({ ...DEFAULT_MODEL_ROLES, classifier: [...DEFAULT_CLASSIFIER] })
+		const saved = JSON.parse(readFileSync(testPath, "utf-8"))
+		expect(saved.modelRoles).toBeUndefined()
+	})
+
+	it("classifier-only models are not allowed multi-model refs", () => {
+		saveModelRoles({ ...DEFAULT_MODEL_ROLES, classifier: ["only/classifier"] })
+		resetModelRolesCache()
+		expect(getAllowedMultiModelRefs()).not.toContain("only/classifier")
 	})
 })

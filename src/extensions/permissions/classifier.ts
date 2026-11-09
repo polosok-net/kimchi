@@ -1,6 +1,7 @@
 import type { Api, Model } from "@earendil-works/pi-ai"
 import { complete } from "@earendil-works/pi-ai/compat"
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent"
+import { isKimchiProvider } from "../../kimchi-provider.js"
 import { createNativeUsageCapture } from "../work-attribution/native-usage.js"
 import {
 	getWorkId,
@@ -180,7 +181,7 @@ async function runClassifier(
 						},
 						signal: attemptSignal,
 						onPayload: (payload: unknown) => {
-							if (payload && typeof payload === "object") {
+							if (isKimchiProvider(model.provider) && payload && typeof payload === "object") {
 								const p = payload as Record<string, unknown>
 								const existing = Array.isArray(p.tags) ? (p.tags as string[]) : []
 								p.tags = [CLASSIFIER_REQUEST_TAG, ...existing]
