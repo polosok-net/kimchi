@@ -1,21 +1,21 @@
 import type { Api, Model } from "@earendil-works/pi-ai"
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent"
 import { findModelByRef } from "../../shared/model-ref.js"
+import { DEFAULT_MODEL_ROLES, getModelRoles, normalizeRoleModels } from "../orchestration/model-roles.js"
 
-export const DEFAULT_CLASSIFIER_CANDIDATE_REFS = [
-	"kimchi-dev/deepseek-v4-flash-0731",
-	"kimchi-dev/glm-5.3-flash",
-	"kimchi-dev/minimax-m3",
-] as const
-
-/** The only classifier seam that knows the catalog's model preferences. */
+/**
+ * Resolves the classifier model ladder from the user-level `modelRoles.classifier`
+ * setting (project settings are never read). A configured list fully replaces the
+ * defaults: when none of its refs resolve, no candidates are returned.
+ */
 export function resolveClassifierCandidates(registry: ModelRegistry): {
 	candidates: Model<Api>[]
 	missingRefs: string[]
 } {
+	const refs = normalizeRoleModels(getModelRoles().classifier ?? DEFAULT_MODEL_ROLES.classifier ?? [])
 	const candidates: Model<Api>[] = []
 	const missingRefs: string[] = []
-	for (const ref of DEFAULT_CLASSIFIER_CANDIDATE_REFS) {
+	for (const ref of refs) {
 		const model = findModelByRef(registry, ref)
 		if (model) candidates.push(model)
 		else missingRefs.push(ref)

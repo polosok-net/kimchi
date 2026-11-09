@@ -5,6 +5,7 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createContext } from "../__mocks__/context.js"
 import { createModel, createModelRegistry } from "../__mocks__/model-registry.js"
+import { resetModelRolesCache } from "../orchestration/model-roles.js"
 import { backendFor } from "../pr-cost-reporting/ledger/records.js"
 import * as diagnostics from "../work-attribution/diagnostics.js"
 import { flushWorkSummaries } from "../work-attribution/summary.js"
@@ -12,6 +13,16 @@ import { getWorkId } from "../work-attribution.js"
 import { classifyToolCall, parseClassifierOutput } from "./classifier.js"
 import { classifierHealth } from "./classifier-health.js"
 import { resolveClassifierCandidates } from "./classifier-models.js"
+
+let settingsRoles: Record<string, unknown> = {}
+vi.mock("../../config/settings.js", async (importOriginal) => {
+	const original = await importOriginal<typeof import("../../config/settings.js")>()
+	return {
+		...original,
+		readConfigSetting: (key: string, guard: (v: unknown) => boolean) =>
+			key === "modelRoles" && guard(settingsRoles) ? settingsRoles : undefined,
+	}
+})
 
 const completeMock = vi.fn()
 vi.mock("@earendil-works/pi-ai/compat", () => ({
@@ -170,6 +181,16 @@ describe("classifyToolCall", () => {
 			max_tokens: 100,
 			tags: ["source:classifier", "existing"],
 		})
+	})
+
+	it("does not add tags for non-Kimchi models", async () => {
+		let sentPayload: unknown
+		completeMock.mockImplementation((_model, _context, opts) => {
+			sentPayload = opts.onPayload({ max_tokens: 100 })
+			return response()
+		})
+		await classifyToolCall([createModel("claude", "anthropic")], createModelRegistry(), call, options)
+		expect(sentPayload).not.toHaveProperty("tags")
 	})
 
 	it.each([
@@ -510,5 +531,44 @@ describe("parseClassifierOutput", () => {
 		expect(r.ok).toBe(true)
 		expect(r.verdict).toBe("safe")
 		expect(r.riskScore).toBeUndefined()
+	})
+})
+
+describe("settings -> request (end to end)", () => {
+	const kimchiModels = [primary, createModel("glm-5.3-flash"), fallback]
+	let sentPayload: unknown
+	beforeEach(() => {
+		settingsRoles = {}
+		resetModelRolesCache()
+		sentPayload = undefined
+		completeMock.mockReset()
+		completeMock.mockImplementation((_model, _context, opts) => {
+			sentPayload = opts.onPayload({})
+			return response()
+		})
+	})
+	afterEach(() => {
+		settingsRoles = {}
+		resetModelRolesCache()
+	})
+
+	it("sends to a configured non-Kimchi classifier without tags", async () => {
+		settingsRoles = { classifier: "anthropic/claude-haiku" }
+		const haiku = createModel("claude-haiku", "anthropic")
+		const registry = createModelRegistry([...kimchiModels, haiku])
+		const { candidates } = resolveClassifierCandidates(registry)
+		expect(candidates[0]?.provider).toBe("anthropic")
+		await classifyToolCall(candidates, registry, call, options)
+		expect(completeMock).toHaveBeenCalledTimes(1)
+		expect(completeMock.mock.calls[0]?.[0].id).toBe("claude-haiku")
+		expect(sentPayload).not.toHaveProperty("tags")
+	})
+
+	it("tags requests to the default Kimchi classifier", async () => {
+		const registry = createModelRegistry(kimchiModels)
+		const { candidates } = resolveClassifierCandidates(registry)
+		await classifyToolCall(candidates, registry, call, options)
+		expect(completeMock.mock.calls[0]?.[0].id).toBe("deepseek-v4-flash-0731")
+		expect(sentPayload).toMatchObject({ tags: ["source:classifier"] })
 	})
 })

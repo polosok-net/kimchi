@@ -83,7 +83,8 @@ Use `/multi-model` in the interactive CLI to toggle models on/off per role, or e
     "orchestrator": "kimchi-dev/kimi-k2.6",
     "builder": ["kimchi-dev/minimax-m2.7", "anthropic/claude-sonnet-4-5"],
     "reviewer": "anthropic/claude-sonnet-4-5",
-    "explorer": "kimchi-dev/nemotron-3-ultra-fp4"
+    "explorer": "kimchi-dev/nemotron-3-ultra-fp4",
+    "classifier": ["kimchi-dev/glm-5.3-flash"]
   }
 }
 ```
@@ -96,6 +97,7 @@ Use `/multi-model` in the interactive CLI to toggle models on/off per role, or e
 | **reviewer** | `kimi-k2.6`, `minimax-m2.7` | Code review. Orchestrator picks the strongest by tier for initial review. |
 | **explorer** | `nemotron-3-ultra-fp4` | Codebase exploration — navigating files, reading code, tracing architecture. |
 | **researcher** | `kimi-k2.6` | Research beyond the codebase — web search, documentation lookup, external sources. |
+| **classifier** | `deepseek-v4-flash-0731`, `glm-5.3-flash`, `minimax-m3` | Permissions safety classifier for auto mode. Ordered list; a configured list replaces the defaults. User settings only. See [docs/model-routing.md](docs/model-routing.md). |
 
 Defaults are hardcoded in `DEFAULT_MODEL_ROLES`. Roles accept any `provider/model-id` string or an array of strings. Only non-default values need to be specified; missing keys fall back to defaults.
 

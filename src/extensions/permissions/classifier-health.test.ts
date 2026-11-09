@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest"
 import { createModel } from "../__mocks__/model-registry.js"
+import { DEFAULT_MODEL_ROLES, normalizeRoleModels } from "../orchestration/model-roles.js"
 import { classifierHealth } from "./classifier-health.js"
-import { DEFAULT_CLASSIFIER_CANDIDATE_REFS } from "./classifier-models.js"
 import { PERMISSION_EVENTS } from "./permissions-events.js"
 import type { ClassifierFailureCode, ClassifierResult } from "./types.js"
+
+const DEFAULT_CLASSIFIER_REFS = normalizeRoleModels(DEFAULT_MODEL_ROLES.classifier ?? [])
+
+const TAIL =
+	" Check the classifier models in modelRoles.classifier (/multi-model or ~/.config/kimchi/harness/settings.json)."
+const UNAVAILABLE =
+	"Permissions classifier unavailable. Calls requiring classification need confirmation or are blocked without a UI." +
+	TAIL
 
 const primary = createModel("deepseek-v4-flash-0731")
 const fallback = createModel("minimax-m3")
@@ -16,8 +24,8 @@ describe("classifierHealth", () => {
 
 	it.each([
 		{ candidates: [primary, fallback], missingRefs: [], usedModelId: fallback.id },
-		{ candidates: [fallback], missingRefs: [DEFAULT_CLASSIFIER_CANDIDATE_REFS[0]], usedModelId: fallback.id },
-		{ candidates: [primary], missingRefs: [DEFAULT_CLASSIFIER_CANDIDATE_REFS[1]], usedModelId: primary.id },
+		{ candidates: [fallback], missingRefs: [DEFAULT_CLASSIFIER_REFS[0]], usedModelId: fallback.id },
+		{ candidates: [primary], missingRefs: [DEFAULT_CLASSIFIER_REFS[1]], usedModelId: primary.id },
 	])("reports successful fallback or reduced availability: $usedModelId", ({
 		candidates,
 		missingRefs,
@@ -35,11 +43,11 @@ describe("classifierHealth", () => {
 			classifierHealth(
 				{ ...healthy, ok: false, usedModelId: undefined, failureCode: "no_candidates" },
 				[],
-				[...DEFAULT_CLASSIFIER_CANDIDATE_REFS],
+				[...DEFAULT_CLASSIFIER_REFS],
 			),
 		).toMatchObject({
 			channel: PERMISSION_EVENTS.CLASSIFIER_UNAVAILABLE,
-			payload: { failureCode: "no_candidates", missingRefs: [...DEFAULT_CLASSIFIER_CANDIDATE_REFS] },
+			payload: { failureCode: "no_candidates", missingRefs: [...DEFAULT_CLASSIFIER_REFS] },
 		})
 	})
 
@@ -62,9 +70,9 @@ describe("classifierHealth", () => {
 		const health = classifierHealth(
 			{ ...healthy, ok: false, reason: "SENTINEL_SECRET", failureCode },
 			[primary],
-			[DEFAULT_CLASSIFIER_CANDIDATE_REFS[1]],
+			[DEFAULT_CLASSIFIER_REFS[1]],
 		)
-		expect(health?.payload).toEqual({ failureCode, missingRefs: [DEFAULT_CLASSIFIER_CANDIDATE_REFS[1]] })
+		expect(health?.payload).toEqual({ failureCode, missingRefs: [DEFAULT_CLASSIFIER_REFS[1]] })
 		expect(JSON.stringify(health)).not.toContain("SENTINEL_SECRET")
 	})
 
@@ -75,8 +83,23 @@ describe("classifierHealth", () => {
 		const other = classifierHealth({ ...healthy, ok: false, failureCode: "provider_error" }, [primary], [])
 		expect(other?.message).not.toContain("KIMCHI_API_KEY")
 		expect(other?.notifyKey).toBe(PERMISSION_EVENTS.CLASSIFIER_UNAVAILABLE)
-		expect(other?.message).toBe(
-			"Permissions classifier unavailable. Calls requiring classification need confirmation or are blocked without a UI.",
+		expect(other?.message).toBe(UNAVAILABLE)
+		expect(noKey?.message).toBe(
+			"Permissions classifier has no Kimchi API key configured. Set KIMCHI_API_KEY to enable auto-approval; calls requiring classification will keep asking for confirmation (or are blocked without a UI).",
+		)
+	})
+
+	it.each<ClassifierFailureCode>(["provider_error", "timeout"])("uses classifier role copy for %s", (failureCode) => {
+		expect(classifierHealth({ ...healthy, ok: false, failureCode }, [primary], [])?.message).toBe(UNAVAILABLE)
+	})
+
+	it("uses classifier role copy for no_candidates", () => {
+		expect(classifierHealth({ ...healthy, ok: false, failureCode: "no_candidates" }, [], [])?.message).toBe(UNAVAILABLE)
+	})
+
+	it("uses classifier role copy when degraded", () => {
+		expect(classifierHealth({ ...healthy, usedModelId: fallback.id }, [primary, fallback], [])?.message).toBe(
+			"Permissions classifier is using a fallback model or has reduced model availability." + TAIL,
 		)
 	})
 })

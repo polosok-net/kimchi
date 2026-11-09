@@ -1,3 +1,6 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent"
 /**
  * Tests for the pure helper functions in model-roles-command.ts.
@@ -6,10 +9,29 @@ import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-a
  * `collectModelMetadata` is exercised without booting the real TUI.
  */
 import type { Component, TUI } from "@earendil-works/pi-tui"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+// Redirect settings.json I/O to a per-test temp dir; never touch the real HOME.
+const settingsDir = join(tmpdir(), `kimchi-model-roles-command-test-${process.pid}`)
+const settingsPath = join(settingsDir, "settings.json")
+
+vi.mock("../../config/json.js", async (importOriginal) => {
+	const original = await importOriginal<typeof import("../../config/json.js")>()
+	return {
+		...original,
+		readJson: (_path: string) => original.readJson(settingsPath),
+		readJsonCached: (_path: string) => original.readJsonCached(settingsPath),
+		writeJson: (_path: string, data: unknown) => original.writeJson(settingsPath, data),
+	}
+})
+
+import { setAvailableModels } from "../../startup-context.js"
+import { createCommandContext } from "../__mocks__/context.js"
+import { createExtensionApi } from "../__mocks__/extension-api.js"
+import { createModel, createModelRegistry } from "../__mocks__/model-registry.js"
+import { resolveClassifierCandidates } from "../permissions/classifier-models.js"
 import type { RoleModelAssignment } from "./model-roles.js"
-import { splitModelRef } from "./model-roles.js"
+import { getAllowedMultiModelRefs, resetModelRolesCache, splitModelRef } from "./model-roles.js"
 import {
 	collectModelMetadata,
 	formatRoleAssignment,
@@ -18,6 +40,7 @@ import {
 	hasMetadataContent,
 	isEqualAssignment,
 	modelRefTags,
+	registerModelRolesCommand,
 } from "./model-roles-command.js"
 
 // Mock model-metadata module
@@ -413,5 +436,130 @@ describe("modelRefTags", () => {
 
 	it("never tags the auto-model pseudo-ref", () => {
 		expect(modelRefTags("kimchi-dev/auto", apiSlugs, deprecatedSlugs)).toEqual([])
+	})
+})
+
+describe("multi-model classifier role", () => {
+	const HAIKU = "kimchi-dev/claude-haiku"
+	const DEFAULTS = ["kimchi-dev/deepseek-v4-flash-0731", "kimchi-dev/glm-5.3-flash", "kimchi-dev/minimax-m3"]
+
+	beforeEach(() => {
+		mkdirSync(settingsDir, { recursive: true })
+		writeFileSync(settingsPath, "{}")
+		resetModelRolesCache()
+		setAvailableModels([
+			{
+				slug: "claude-haiku",
+				display_name: "Haiku",
+				provider: "anthropic",
+				reasoning: false,
+				input_modalities: ["text"],
+				is_serverless: true,
+				limits: { context_window: 1000, max_output_tokens: 100 },
+			},
+		])
+	})
+
+	afterEach(() => {
+		rmSync(settingsDir, { recursive: true, force: true })
+		resetModelRolesCache()
+		setAvailableModels([])
+	})
+
+	const readSettings = (): { modelRoles?: Record<string, unknown> } => JSON.parse(readFileSync(settingsPath, "utf-8"))
+
+	type Mode = "tui" | "rpc"
+
+	/** Runs the command; `toggles` are refs to flip in the classifier editor (in order). */
+	async function run(mode: Mode, toggles: string[]): Promise<{ menus: string[][] }> {
+		const { api, getRegisteredCommand } = createExtensionApi()
+		registerModelRolesCommand(api)
+		const ctx = createCommandContext()
+		Object.assign(ctx, { mode })
+		const menus: string[][] = []
+		let opened = false
+		const pending = [...toggles]
+
+		vi.mocked(ctx.ui.select).mockImplementation(async (title: string, options: string[]) => {
+			if (title === "Model Roles") {
+				menus.push(options)
+				if (opened) return undefined
+				opened = true
+				return options.find((o) => o.startsWith("Classifier:"))
+			}
+			// ACP-style toggle loop: pick the next ref to flip, then Done.
+			const next = pending.shift()
+			if (next === undefined) return options.at(-1)
+			return options.find((o) => o.includes(` ${next}`))
+		})
+
+		vi.mocked(ctx.ui.custom).mockImplementation(async (factory) => {
+			if (mode === "rpc") return undefined
+			return new Promise((resolve) => {
+				const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s }
+				const component = (factory as (...a: unknown[]) => Component)({ requestRender: () => {} }, theme, {}, resolve)
+				const refs = component
+					.render(200)
+					.map((l) => l.match(/\[[ x]\] (\S+)/)?.[1])
+					.filter((r): r is string => r !== undefined)
+				let cursor = 0
+				for (const ref of pending.splice(0)) {
+					const target = refs.indexOf(ref)
+					while (cursor !== target) {
+						component.handleInput?.("\x1b[B")
+						cursor = (cursor + 1) % refs.length
+					}
+					component.handleInput?.(" ")
+				}
+				component.handleInput?.("\r")
+			})
+		})
+
+		await getRegisteredCommand("multi-model")?.handler("", ctx)
+		return { menus }
+	}
+
+	const registry = createModelRegistry([HAIKU, ...DEFAULTS].map((r) => createModel(r.split("/")[1])))
+
+	it("lists a classifier entry in the main menu", async () => {
+		const { menus } = await run("tui", [])
+		expect(menus[0].some((o) => o.startsWith("Classifier:"))).toBe(true)
+	})
+
+	it("offers metadata editing on the TUI but hides it on ACP (no ui.custom)", async () => {
+		const tui = await run("tui", [])
+		expect(tui.menus[0]).toContain("Edit model metadata...")
+		const rpc = await run("rpc", [])
+		expect(rpc.menus[0]).not.toContain("Edit model metadata...")
+	})
+
+	it("persists a ticked non-default model through the TUI toggle", async () => {
+		await run("tui", [HAIKU, ...DEFAULTS])
+		expect(readSettings().modelRoles?.classifier).toEqual(HAIKU)
+		expect(resolveClassifierCandidates(registry).candidates[0]?.id).toBe("claude-haiku")
+	})
+
+	it("keeps defaults first and appends a ticked model", async () => {
+		await run("tui", [HAIKU])
+		expect(readSettings().modelRoles?.classifier).toEqual([...DEFAULTS, HAIKU])
+	})
+
+	it("persists the same result through ACP's select-based fallback", async () => {
+		await run("rpc", [HAIKU, ...DEFAULTS])
+		expect(readSettings().modelRoles?.classifier).toEqual(HAIKU)
+		expect(resolveClassifierCandidates(registry).candidates[0]?.id).toBe("claude-haiku")
+	})
+
+	it("writes nothing when classifier is opened and confirmed unchanged", async () => {
+		await run("tui", [])
+		expect(readSettings().modelRoles?.classifier).toBeUndefined()
+		await run("rpc", [])
+		expect(readSettings().modelRoles?.classifier).toBeUndefined()
+	})
+
+	it("does not leak a classifier-only model into delegation refs", async () => {
+		await run("tui", [HAIKU, ...DEFAULTS])
+		expect(readSettings().modelRoles?.classifier).toEqual(HAIKU)
+		expect(getAllowedMultiModelRefs()).not.toContain(HAIKU)
 	})
 })

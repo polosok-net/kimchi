@@ -80,13 +80,17 @@ const ROLE_LABELS: Record<keyof ModelRoles, { label: string; description: string
 	judge: { label: "Judge", description: "ferment verification and grading" },
 	// Not surfaced in this interactive picker (ROLE_KEYS below omits it) — config-file only for now.
 	compactor: { label: "Compactor", description: "summarizes ferment stage-boundary handoffs" },
+	classifier: {
+		label: "Classifier",
+		description: "permissions safety classifier (auto mode). Ordered list; replaces the defaults",
+	},
 }
 
 // "compactor" is excluded here (not just from the arrays): it's optional and
 // config-file only — this interactive picker doesn't surface it, and indexing
 // roles[key]/DEFAULT_MODEL_ROLES[key] for key in these arrays must stay
 // narrowed away from compactor's `string | undefined` type.
-const DELEGABLE_KEYS: (keyof Omit<ModelRoles, "orchestrator" | "compactor">)[] = [
+const DELEGABLE_KEYS: (keyof Omit<ModelRoles, "orchestrator" | "compactor" | "classifier">)[] = [
 	"planner",
 	"builder",
 	"reviewer",
@@ -95,7 +99,20 @@ const DELEGABLE_KEYS: (keyof Omit<ModelRoles, "orchestrator" | "compactor">)[] =
 	"judge",
 ]
 
-const ROLE_KEYS: (keyof Omit<ModelRoles, "compactor">)[] = ["orchestrator", ...DELEGABLE_KEYS]
+const ROLE_KEYS: (keyof Omit<ModelRoles, "compactor" | "classifier">)[] = ["orchestrator", ...DELEGABLE_KEYS]
+
+// Picker-only: the classifier is configurable here but is not a delegation role,
+// so delegation code keeps using ROLE_KEYS.
+type PickerRoleKey = keyof Omit<ModelRoles, "compactor">
+const PICKER_ROLE_KEYS: PickerRoleKey[] = [...ROLE_KEYS, "classifier"]
+
+function roleValue(roles: ModelRoles, key: PickerRoleKey): RoleModelAssignment {
+	return roles[key] ?? DEFAULT_MODEL_ROLES[key] ?? []
+}
+
+function roleDefault(key: PickerRoleKey): RoleModelAssignment {
+	return DEFAULT_MODEL_ROLES[key] ?? []
+}
 
 /**
  * Whether `collectModelMetadata()` produced something worth persisting.
@@ -119,10 +136,10 @@ export function isEqualAssignment(a: RoleModelAssignment, b: RoleModelAssignment
 	return arrA.length === arrB.length && arrA.every((v, i) => v === arrB[i])
 }
 
-export function formatRoleSummaryBlock(role: keyof Omit<ModelRoles, "compactor">, value: RoleModelAssignment): string {
+export function formatRoleSummaryBlock(role: PickerRoleKey, value: RoleModelAssignment): string {
 	const info = ROLE_LABELS[role]
 	const models = normalizeRoleModels(value)
-	const isDefault = isEqualAssignment(value, DEFAULT_MODEL_ROLES[role])
+	const isDefault = isEqualAssignment(value, roleDefault(role))
 
 	const indent = "    "
 	const modelLines = models.map((ref) => {
@@ -133,9 +150,9 @@ export function formatRoleSummaryBlock(role: keyof Omit<ModelRoles, "compactor">
 	return `${info.label}:\n${modelLines.join("\n")}`
 }
 
-export function formatRoleDisplay(role: keyof Omit<ModelRoles, "compactor">, value: RoleModelAssignment): string {
+export function formatRoleDisplay(role: PickerRoleKey, value: RoleModelAssignment): string {
 	const info = ROLE_LABELS[role]
-	const isDefault = isEqualAssignment(value, DEFAULT_MODEL_ROLES[role])
+	const isDefault = isEqualAssignment(value, roleDefault(role))
 	const suffix = isDefault ? " (default)" : ""
 	return `${info.label}: ${formatRoleAssignment(value)}${suffix}`
 }
@@ -192,11 +209,12 @@ export async function collectModelMetadata(
 	]
 
 	const result = await withRawInputCapture(() =>
-		ctx.ui.custom<QuestionFormResult>((tui, theme, _kb, done) =>
+		ctx.ui.custom<QuestionFormResult | undefined>((tui, theme, _kb, done) =>
 			createQuestionForm(tui, theme, questions, { title: ref }, done),
 		),
 	)
-	if (result.cancelled) return undefined
+	// ACP's ui.custom resolves undefined (no component support).
+	if (!result || result.cancelled) return undefined
 
 	const byId = new Map(result.answers.map((a) => [a.id, a]))
 	const config: ModelCustomMetadata = {}
@@ -352,7 +370,8 @@ export function registerModelRolesCommand(pi: ExtensionAPI): void {
 	pi.registerCommand("multi-model", {
 		description: "Configure model roles (orchestrator, planner, builder, reviewer, explorer, researcher, judge)",
 		async handler(_args, ctx) {
-			if (ctx.mode !== "tui") {
+			// ACP runs extensions with mode "rpc": allow it, the editors fall back to ui.select.
+			if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
 				ctx.ui.notify("Model roles configuration requires a TUI session.", "warning")
 				return
 			}
@@ -365,8 +384,8 @@ export function registerModelRolesCommand(pi: ExtensionAPI): void {
 			// when the backend catalog advertises them to this account.
 			const availableModelRefs = [...new Set(apiModels.map((m) => `kimchi-dev/${m.slug}`))]
 
-			for (const key of ROLE_KEYS) {
-				for (const ref of normalizeRoleModels(roles[key])) {
+			for (const key of PICKER_ROLE_KEYS) {
+				for (const ref of normalizeRoleModels(roleValue(roles, key))) {
 					if (!availableModelRefs.includes(ref)) {
 						availableModelRefs.push(ref)
 					}
@@ -401,8 +420,10 @@ export function registerModelRolesCommand(pi: ExtensionAPI): void {
 			}
 
 			const showMainMenu = async (): Promise<void> => {
-				const roleOptions = ROLE_KEYS.map((key) => formatRoleSummaryBlock(key, roles[key]))
-				const options = [...roleOptions, "Edit model metadata...", "Reset all to defaults"]
+				const roleOptions = PICKER_ROLE_KEYS.map((key) => formatRoleSummaryBlock(key, roleValue(roles, key)))
+				// The metadata form needs ui.custom, which ACP (mode "rpc") lacks.
+				const metadataOption = ctx.mode === "rpc" ? [] : ["Edit model metadata..."]
+				const options = [...roleOptions, ...metadataOption, "Reset all to defaults"]
 
 				// No cursor preservation: the menu reopens from row 0 every
 				// time, which is what users expect when re-entering a fresh
@@ -445,10 +466,12 @@ export function registerModelRolesCommand(pi: ExtensionAPI): void {
 					return
 				}
 
-				const roleIndex = ROLE_KEYS.findIndex((key) => choice === formatRoleSummaryBlock(key, roles[key]))
+				const roleIndex = PICKER_ROLE_KEYS.findIndex(
+					(key) => choice === formatRoleSummaryBlock(key, roleValue(roles, key)),
+				)
 				if (roleIndex === -1) return
 
-				const roleKey = ROLE_KEYS[roleIndex]
+				const roleKey = PICKER_ROLE_KEYS[roleIndex]
 
 				if (roleKey === "orchestrator") {
 					await showSingleModelEditor(roleKey)
@@ -458,7 +481,9 @@ export function registerModelRolesCommand(pi: ExtensionAPI): void {
 				await showMainMenu()
 			}
 
-			const showSingleModelEditor = async (roleKey: keyof Omit<ModelRoles, "compactor">): Promise<void> => {
+			const showSingleModelEditor = async (
+				roleKey: keyof Omit<ModelRoles, "compactor" | "classifier">,
+			): Promise<void> => {
 				const info = ROLE_LABELS[roleKey]
 				const currentModels = normalizeRoleModels(roles[roleKey])
 
@@ -501,11 +526,30 @@ export function registerModelRolesCommand(pi: ExtensionAPI): void {
 				}
 			}
 
-			const showMultiModelEditor = async (roleKey: keyof Omit<ModelRoles, "compactor">): Promise<void> => {
-				const info = ROLE_LABELS[roleKey]
-				const selected = new Set(normalizeRoleModels(roles[roleKey]))
+			// select-based toggle loop for surfaces without ui.custom (ACP).
+			const toggleViaSelect = async (label: string, selected: Set<string>): Promise<ToggleSelectResult> => {
+				const doneLabel = "Done"
+				for (;;) {
+					const options = [
+						...availableModelRefs.map((ref) => `${selected.has(ref) ? "[x]" : "[ ]"} ${ref}${refSuffix(ref)}`),
+						doneLabel,
+					]
+					const choice = await ctx.ui.select(`${label} — toggle models (${selected.size} selected)`, options)
+					if (!choice) return { selected, cancelled: true }
+					if (choice === doneLabel) return { selected, cancelled: false }
+					const ref = availableModelRefs.find(
+						(r) => choice === `${selected.has(r) ? "[x]" : "[ ]"} ${r}${refSuffix(r)}`,
+					)
+					if (ref === undefined) continue
+					if (!selected.delete(ref)) selected.add(ref)
+				}
+			}
 
-				const result = await ctx.ui.custom<ToggleSelectResult>((tui, theme, _kb, done) =>
+			const showMultiModelEditor = async (roleKey: Exclude<PickerRoleKey, "orchestrator">): Promise<void> => {
+				const info = ROLE_LABELS[roleKey]
+				const selected = new Set(normalizeRoleModels(roleValue(roles, roleKey)))
+
+				const custom = await ctx.ui.custom<ToggleSelectResult | undefined>((tui, theme, _kb, done) =>
 					createToggleSelect(
 						tui,
 						theme,
@@ -516,6 +560,7 @@ export function registerModelRolesCommand(pi: ExtensionAPI): void {
 						(ref) => `${ref}${refSuffix(ref)}`,
 					),
 				)
+				const result = custom ?? (await toggleViaSelect(info.label, selected))
 
 				if (result.cancelled) return
 
@@ -556,8 +601,8 @@ export function registerModelRolesCommand(pi: ExtensionAPI): void {
 					}
 				}
 
-				for (const key of ROLE_KEYS) {
-					for (const ref of normalizeRoleModels(roles[key])) {
+				for (const key of PICKER_ROLE_KEYS) {
+					for (const ref of normalizeRoleModels(roleValue(roles, key))) {
 						if (!seen.has(ref)) {
 							seen.add(ref)
 							const resolved = resolveModelMetadata(ref)

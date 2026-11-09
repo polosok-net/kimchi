@@ -9,6 +9,9 @@
  *   - researcher: research beyond codebase — web search, documentation lookup
  *   - judge: ferment verification and final grading calls
  *   - compactor: context summarization model.
+ *   - classifier: permissions safety classifier candidates (ordered list). User
+ *     scope only, a configured list strictly replaces the defaults, and these
+ *     models are never used for delegation.
  *
  * Delegable roles (planner, builder, reviewer, explorer) accept either a
  * single model string or an array of candidates. When multiple models are
@@ -32,7 +35,8 @@
  *     "reviewer": "kimchi-dev/minimax-m2.7",
  *     "explorer": "kimchi-dev/deepseek-v4-flash",
  *     "judge": "kimchi-dev/kimi-k2.6",
- *     "compactor": "kimchi-dev/nemotron-3-ultra-fp4"
+ *     "compactor": "kimchi-dev/nemotron-3-ultra-fp4",
+ *     "classifier": ["kimchi-dev/glm-5.3-flash"]   // permissions classifier candidates (replaces defaults)
  *   }
  * }
  * ```
@@ -75,12 +79,14 @@ export interface ModelRoles {
 	judge: RoleModelAssignment
 	/** Context summarization model. */
 	compactor?: string
+	/** Permissions classifier model(s): ordered candidates; a configured list fully replaces the defaults. */
+	classifier?: RoleModelAssignment
 }
 
 // "compactor" is excluded from these key types (not just omitted from the arrays):
 // it's optional and single-model-only, so indexing roles[key] for key in ROLE_KEYS
 // must stay narrowed to the always-present, non-optional role keys.
-const DELEGABLE_ROLE_KEYS: readonly (keyof Omit<ModelRoles, "orchestrator" | "compactor">)[] = [
+const DELEGABLE_ROLE_KEYS: readonly (keyof Omit<ModelRoles, "orchestrator" | "compactor" | "classifier">)[] = [
 	"planner",
 	"builder",
 	"reviewer",
@@ -88,7 +94,10 @@ const DELEGABLE_ROLE_KEYS: readonly (keyof Omit<ModelRoles, "orchestrator" | "co
 	"researcher",
 	"judge",
 ]
-const ROLE_KEYS: readonly (keyof Omit<ModelRoles, "compactor">)[] = ["orchestrator", ...DELEGABLE_ROLE_KEYS]
+const ROLE_KEYS: readonly (keyof Omit<ModelRoles, "compactor" | "classifier">)[] = [
+	"orchestrator",
+	...DELEGABLE_ROLE_KEYS,
+]
 
 /** Hardcoded default model-to-role assignment. Users override via /multi-model. */
 export const DEFAULT_MODEL_ROLES: Readonly<ModelRoles> = {
@@ -100,6 +109,7 @@ export const DEFAULT_MODEL_ROLES: Readonly<ModelRoles> = {
 	researcher: "kimchi-dev/deepseek-v4-flash-0731",
 	judge: ["kimchi-dev/glm-5.3"],
 	compactor: "kimchi-dev/deepseek-v4-flash-0731",
+	classifier: ["kimchi-dev/deepseek-v4-flash-0731", "kimchi-dev/glm-5.3-flash", "kimchi-dev/minimax-m3"],
 }
 
 export interface ModelRolesWarning {
@@ -183,6 +193,20 @@ export function parseModelRoles(obj: ModelRoles | Record<string, unknown> | unde
 		}
 	}
 
+	const classifierValue = obj.classifier
+	if (classifierValue != null) {
+		if (isValidRoleValue(classifierValue)) {
+			roles.classifier = trimRoleValue(classifierValue)
+		} else {
+			warnings.push({
+				role: "classifier",
+				configuredModel: String(classifierValue),
+				message:
+					'modelRoles.classifier must be a non-empty string or array of strings (e.g. ["kimchi-dev/glm-5.3-flash"]). Using default.',
+			})
+		}
+	}
+
 	return { roles, warnings }
 }
 
@@ -213,6 +237,13 @@ export function saveModelRoles(roles: ModelRoles): void {
 	}
 	if (roles.compactor !== undefined && roles.compactor !== DEFAULT_MODEL_ROLES.compactor) {
 		rolesObj.compactor = roles.compactor
+	}
+	if (
+		roles.classifier !== undefined &&
+		DEFAULT_MODEL_ROLES.classifier !== undefined &&
+		!isEqualRoleValue(roles.classifier, DEFAULT_MODEL_ROLES.classifier)
+	) {
+		rolesObj.classifier = roles.classifier
 	}
 
 	if (Object.keys(rolesObj).length === 0) {
@@ -345,7 +376,9 @@ function isEqualModelRoles(a: ModelRoles, b: ModelRoles): boolean {
 	}
 	// compactor is excluded from ROLE_KEYS (optional, not part of the generic
 	// loop's types — see the ROLE_KEYS comment), so it needs its own comparison.
-	return a.compactor === b.compactor
+	if (a.compactor !== b.compactor) return false
+	if (a.classifier === undefined || b.classifier === undefined) return a.classifier === b.classifier
+	return isEqualRoleValue(a.classifier, b.classifier)
 }
 
 /**

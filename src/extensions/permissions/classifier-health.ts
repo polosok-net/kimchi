@@ -44,7 +44,7 @@ export function classifierHealth(
 			message:
 				failureCode === "no_api_key"
 					? "Permissions classifier has no Kimchi API key configured. Set KIMCHI_API_KEY to enable auto-approval; calls requiring classification will keep asking for confirmation (or are blocked without a UI)."
-					: "Permissions classifier unavailable. Calls requiring classification need confirmation or are blocked without a UI.",
+					: "Permissions classifier unavailable. Calls requiring classification need confirmation or are blocked without a UI. Check the classifier models in modelRoles.classifier (/multi-model or ~/.config/kimchi/harness/settings.json).",
 		}
 	}
 	if (result.usedModelId && (missingRefs.length > 0 || result.usedModelId !== candidates[0]?.id)) {
@@ -52,7 +52,8 @@ export function classifierHealth(
 			channel: PERMISSION_EVENTS.CLASSIFIER_DEGRADED,
 			payload: { usedModelId: result.usedModelId, missingRefs },
 			notifyKey: PERMISSION_EVENTS.CLASSIFIER_DEGRADED,
-			message: "Permissions classifier is using a fallback model or has reduced model availability.",
+			message:
+				"Permissions classifier is using a fallback model or has reduced model availability. Check the classifier models in modelRoles.classifier (/multi-model or ~/.config/kimchi/harness/settings.json).",
 		}
 	}
 	return undefined
